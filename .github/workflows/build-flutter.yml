@@ -1,0 +1,22 @@
+name: Build Flutter APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      jobId:
+        description: 'Job ID from Bot'
+        required: true
+      userId:
+        description: 'User ID'
+        required: true
+      payload:
+        description: 'Build Payload (JSON)'
+        required: true
+
+jobs:
+  build:
+    uses: bedabang/bot-build-1/.github/workflows/build-flutter-reusable.yml@main
+    with:
+      jobId: ${{ inputs.jobId }}
+      userId: ${{ inputs.userId }}
+      payload: ${{ inputs.payload }}
