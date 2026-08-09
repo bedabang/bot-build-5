@@ -15,7 +15,7 @@ on:
 
 jobs:
   build:
-    uses: bedabang/bot-build-1/.github/workflows/build-flutter-reusable.yml@main
+    uses: bedabang/bot-build-5/.github/workflows/build-flutter-reusable.yml@main
     with:
       jobId: ${{ inputs.jobId }}
       userId: ${{ inputs.userId }}
