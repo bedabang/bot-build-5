@@ -18,6 +18,7 @@ env:
     3.32.0
     3.32.5
     3.35.0
+    3.38.0
 
 jobs:
   build:
@@ -146,15 +147,16 @@ jobs:
           import os
 
           min_sdk = os.environ.get('MIN_SDK', '3.8')
-          pool = ["3.32.0", "3.32.5", "3.35.0"]
+          pool = ["3.32.0", "3.32.5", "3.35.0", "3.38.0"]
 
           compat_map = {
-              "3.8": ["3.32.0", "3.32.5", "3.35.0"],
-              "3.9": ["3.32.5", "3.35.0"],
-              "3.10": ["3.35.0"],
+              "3.8": ["3.32.0", "3.32.5", "3.35.0", "3.38.0"],
+              "3.9": ["3.32.5", "3.35.0", "3.38.0"],
+              "3.10": ["3.35.0", "3.38.0"],
+              "3.11": ["3.38.0"],
           }
 
-          candidates = compat_map.get(min_sdk, pool)
+          candidates = compat_map.get(min_sdk, ["3.38.0"])
           print(" ".join(candidates))
           PYEOF
           )
@@ -622,6 +624,60 @@ jobs:
 
                 if [ $BUILD_EXIT -eq 0 ]; then
                   echo "✅ BUILD BERHASIL setelah OOM fix"
+                  SUCCESS=true
+                  FLUTTER_VERSION_USED="$FLUTTER_VER"
+                  break
+                fi
+              fi
+            fi
+
+            # Handler: Kotlin DSL version error (permission_handler_android 14+, dll)
+            if [ $BUILD_EXIT -ne 0 ]; then
+              KOTLIN_ERR=$(grep -cE "Unresolved reference.*compilerOptions|kotlin\s*\{.*Unresolved|compilerOptions.*Unresolved" \
+                "$BUILD_LOG" 2>/dev/null || true)
+              if [ "${KOTLIN_ERR:-0}" -gt 0 ]; then
+                echo "Kotlin DSL version error terdeteksi, injecting dependency_overrides..."
+                python3 - "$(pwd)" <<'KOTLIN_PYEOF'
+          import re, sys, os
+
+          project = sys.argv[1]
+          pubspec_path = os.path.join(project, 'pubspec.yaml')
+          if not os.path.exists(pubspec_path):
+              sys.exit(0)
+
+          with open(pubspec_path) as f:
+              content = f.read()
+
+          # Override permission_handler_android ke versi yang tidak pakai Kotlin DSL baru
+          overrides_to_add = {
+              'permission_handler_android': '">=13.0.0 <14.0.0"',
+          }
+
+          if 'dependency_overrides:' not in content:
+              entries = ''.join(f'  {k}: {v}\n' for k, v in overrides_to_add.items())
+              content = content.rstrip() + '\n\ndependency_overrides:\n' + entries
+          else:
+              for pkg, ver in overrides_to_add.items():
+                  if not re.search(rf'^\s+{re.escape(pkg)}\s*:', content, re.M):
+                      content = re.sub(
+                          r'(dependency_overrides:\s*\n)',
+                          f'\\1  {pkg}: {ver}\n',
+                          content
+                      )
+
+          with open(pubspec_path, 'w') as f:
+              f.write(content)
+
+          print(f"Injected dependency_overrides: {list(overrides_to_add.keys())}")
+          KOTLIN_PYEOF
+
+                fvm flutter pub get 2>/dev/null || true
+                fvm flutter build apk --release --no-tree-shake-icons \
+                  --android-skip-build-dependency-validation 2>&1 | tee "$BUILD_LOG"
+                BUILD_EXIT=${PIPESTATUS[0]}
+
+                if [ $BUILD_EXIT -eq 0 ]; then
+                  echo "✅ BUILD BERHASIL setelah Kotlin DSL fix"
                   SUCCESS=true
                   FLUTTER_VERSION_USED="$FLUTTER_VER"
                   break
