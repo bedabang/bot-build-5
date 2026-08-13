@@ -19,6 +19,7 @@ env:
     3.32.5
     3.35.0
     3.38.0
+    3.47.0
 
 jobs:
   build:
@@ -147,16 +148,18 @@ jobs:
           import os
 
           min_sdk = os.environ.get('MIN_SDK', '3.8')
-          pool = ["3.32.0", "3.32.5", "3.35.0", "3.38.0"]
+          pool = ["3.32.0", "3.32.5", "3.35.0", "3.38.0", "3.47.0"]
 
           compat_map = {
               "3.8": ["3.32.0", "3.32.5", "3.35.0", "3.38.0"],
               "3.9": ["3.32.5", "3.35.0", "3.38.0"],
               "3.10": ["3.35.0", "3.38.0"],
               "3.11": ["3.38.0"],
+              "3.12": ["3.47.0"],
+              "3.13": ["3.47.0"],
           }
 
-          candidates = compat_map.get(min_sdk, ["3.38.0"])
+          candidates = compat_map.get(min_sdk, ["3.47.0"])
           print(" ".join(candidates))
           PYEOF
           )
@@ -219,6 +222,33 @@ jobs:
           else
             echo "Tidak perlu patch compileSdk."
           fi
+
+      - name: Pin Dependencies to Tested Versions
+        working-directory: ${{ env.PROJECT_ROOT }}
+        run: |
+          echo "Pinning font_awesome_flutter to tested version 10.9.1..."
+          python3 - "$(pwd)" <<'PYEOF'
+          import os, re
+
+          pubspec_path = os.path.join(os.sys.argv[1], 'pubspec.yaml')
+          if not os.path.exists(pubspec_path):
+              print("pubspec.yaml tidak ditemukan")
+              exit(1)
+
+          with open(pubspec_path) as f:
+              content = f.read()
+
+          content = re.sub(
+              r'(\s+)font_awesome_flutter:\s*["\']?\^?[\d.]+["\']?',
+              r'\1font_awesome_flutter: "^10.9.0"',
+              content
+          )
+
+          with open(pubspec_path, 'w') as f:
+              f.write(content)
+
+          print("✅ Pinned font_awesome_flutter to ^10.9.0")
+          PYEOF
 
       - name: Tune JVM Memory untuk Gradle
         working-directory: ${{ env.PROJECT_ROOT }}
@@ -631,7 +661,48 @@ jobs:
               fi
             fi
 
-            # Handler: Kotlin DSL version error (permission_handler_android 14+, dll)
+            if [ $BUILD_EXIT -ne 0 ]; then
+              FAICON_ERR=$(grep -cE "FaIconData.*can't be assigned to.*IconData|ByteData.*isn't a type" \
+                "$BUILD_LOG" 2>/dev/null || true)
+              if [ "${FAICON_ERR:-0}" -gt 0 ]; then
+                echo "FaIconData type mismatch terdeteksi, downgrade font_awesome_flutter ke 10.9.0..."
+                python3 - "$(pwd)" <<'FAICON_PYEOF'
+          import os, re
+
+          pubspec_path = os.path.join(".", "pubspec.yaml")
+          if not os.path.exists(pubspec_path):
+              exit(1)
+
+          with open(pubspec_path) as f:
+              content = f.read()
+
+          content = re.sub(
+              r'(\s+)font_awesome_flutter:\s*["\']?[\d.^~><=\s]+["\']?',
+              r'\1font_awesome_flutter: "^10.9.0"',
+              content
+          )
+
+          with open(pubspec_path, 'w') as f:
+              f.write(content)
+
+          print("Force pinned font_awesome_flutter to ^10.9.0")
+          FAICON_PYEOF
+
+                fvm flutter pub get 2>/dev/null || true
+                fvm flutter clean 2>/dev/null || true
+                fvm flutter build apk --release --no-tree-shake-icons \
+                  --android-skip-build-dependency-validation 2>&1 | tee "$BUILD_LOG"
+                BUILD_EXIT=${PIPESTATUS[0]}
+
+                if [ $BUILD_EXIT -eq 0 ]; then
+                  echo "✅ BUILD BERHASIL setelah font_awesome downgrade"
+                  SUCCESS=true
+                  FLUTTER_VERSION_USED="$FLUTTER_VER"
+                  break
+                fi
+              fi
+            fi
+
             if [ $BUILD_EXIT -ne 0 ]; then
               KOTLIN_ERR=$(grep -cE "Unresolved reference.*compilerOptions|kotlin\s*\{.*Unresolved|compilerOptions.*Unresolved" \
                 "$BUILD_LOG" 2>/dev/null || true)
@@ -648,7 +719,6 @@ jobs:
           with open(pubspec_path) as f:
               content = f.read()
 
-          # Override permission_handler_android ke versi yang tidak pakai Kotlin DSL baru
           overrides_to_add = {
               'permission_handler_android': '">=13.0.0 <14.0.0"',
           }
