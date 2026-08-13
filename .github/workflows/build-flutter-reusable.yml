@@ -223,33 +223,6 @@ jobs:
             echo "Tidak perlu patch compileSdk."
           fi
 
-      - name: Pin Dependencies to Tested Versions
-        working-directory: ${{ env.PROJECT_ROOT }}
-        run: |
-          echo "Pinning font_awesome_flutter to tested version 10.9.1..."
-          python3 - "$(pwd)" <<'PYEOF'
-          import os, re
-
-          pubspec_path = os.path.join(os.sys.argv[1], 'pubspec.yaml')
-          if not os.path.exists(pubspec_path):
-              print("pubspec.yaml tidak ditemukan")
-              exit(1)
-
-          with open(pubspec_path) as f:
-              content = f.read()
-
-          content = re.sub(
-              r'(\s+)font_awesome_flutter:\s*["\']?\^?[\d.]+["\']?',
-              r'\1font_awesome_flutter: "^10.9.0"',
-              content
-          )
-
-          with open(pubspec_path, 'w') as f:
-              f.write(content)
-
-          print("✅ Pinned font_awesome_flutter to ^10.9.0")
-          PYEOF
-
       - name: Tune JVM Memory untuk Gradle
         working-directory: ${{ env.PROJECT_ROOT }}
         run: |
@@ -284,8 +257,43 @@ jobs:
           ATTEMPT=0
           SUCCESS=false
           FLUTTER_VERSION_USED=""
+          FA_VERSION_USED=""
 
           export PATH="$PATH:$HOME/.pub-cache/bin"
+
+          pin_fa_version() {
+            local FA_VER="$1"
+            python3 - "$FA_VER" <<'PYEOF'
+          import re, sys, os
+
+          fa_ver = sys.argv[1]
+          pubspec_path = "pubspec.yaml"
+          if not os.path.exists(pubspec_path):
+              sys.exit(0)
+
+          with open(pubspec_path) as f:
+              content = f.read()
+
+          if re.search(r'^\s+font_awesome_flutter\s*:', content, re.M):
+              content = re.sub(
+                  r'(\n\s+font_awesome_flutter:\s*)["\']?[\^~><=\d.\s]+["\']?',
+                  r'\1"^' + fa_ver + '"',
+                  content
+              )
+          else:
+              content = re.sub(
+                  r'(dependencies:\s*\n)',
+                  r'\1  font_awesome_flutter: "^' + fa_ver + '"\n',
+                  content,
+                  count=1
+              )
+
+          with open(pubspec_path, 'w') as f:
+              f.write(content)
+
+          print(f"Pinned font_awesome_flutter to ^{fa_ver}")
+          PYEOF
+          }
 
           patch_compile_sdk() {
             local NEW_SDK="$1"
@@ -488,29 +496,37 @@ jobs:
               fvm flutter clean 2>/dev/null || true
             fi
 
-            PUB_LOG=$(mktemp)
-            echo "Running flutter pub get..."
-            if ! fvm flutter pub get 2>&1 | tee "$PUB_LOG"; then
-              echo "flutter pub get gagal untuk $FLUTTER_VER, coba versi berikutnya..."
-              continue
+            if [ "$FLUTTER_VER" = "3.47.0" ]; then
+              FA_VERSIONS_TO_TRY="11.0.0"
+            else
+              FA_VERSIONS_TO_TRY="10.9.0 10.9.1 11.0.0"
             fi
 
-            BUILD_LOG=$(mktemp)
-            echo "Building APK Release..."
-
-            fvm flutter build apk --release --no-tree-shake-icons \
-              --android-skip-build-dependency-validation 2>&1 | tee "$BUILD_LOG"
-            BUILD_EXIT=${PIPESTATUS[0]}
-
-            if [ $BUILD_EXIT -eq 0 ]; then
+            for FA_VER in $FA_VERSIONS_TO_TRY; do
               echo ""
-              echo "✅ BUILD BERHASIL dengan Flutter $FLUTTER_VER"
-              SUCCESS=true
-              FLUTTER_VERSION_USED="$FLUTTER_VER"
-              break
-            fi
+              echo "-- Flutter $FLUTTER_VER + font_awesome_flutter $FA_VER --"
 
-            if [ $BUILD_EXIT -ne 0 ]; then
+              pin_fa_version "$FA_VER"
+
+              PUB_LOG=$(mktemp)
+              if ! fvm flutter pub get 2>&1 | tee "$PUB_LOG"; then
+                echo "flutter pub get gagal dengan font_awesome_flutter $FA_VER, coba versi berikutnya..."
+                continue
+              fi
+
+              BUILD_LOG=$(mktemp)
+              fvm flutter build apk --release --no-tree-shake-icons \
+                --android-skip-build-dependency-validation 2>&1 | tee "$BUILD_LOG"
+              BUILD_EXIT=${PIPESTATUS[0]}
+
+              if [ $BUILD_EXIT -eq 0 ]; then
+                echo "✅ BUILD BERHASIL dengan Flutter $FLUTTER_VER + font_awesome_flutter $FA_VER"
+                SUCCESS=true
+                FLUTTER_VERSION_USED="$FLUTTER_VER"
+                FA_VERSION_USED="$FA_VER"
+                break
+              fi
+
               REQ_MIN=$(grep -oE "cannot be smaller than version [0-9]+" "$BUILD_LOG" \
                 | grep -oE "[0-9]+" | head -1)
               if [ -n "$REQ_MIN" ]; then
@@ -536,12 +552,11 @@ jobs:
                   echo "✅ BUILD BERHASIL setelah minSdk patch"
                   SUCCESS=true
                   FLUTTER_VERSION_USED="$FLUTTER_VER"
+                  FA_VERSION_USED="$FA_VER"
                   break
                 fi
               fi
-            fi
 
-            if [ $BUILD_EXIT -ne 0 ]; then
               HAS_SDK_ERR=$(grep -cE "Failed to find Platform SDK|compiles against Android SDK [0-9]+" \
                 "$BUILD_LOG" || true)
               if [ "${HAS_SDK_ERR:-0}" -gt 0 ]; then
@@ -555,12 +570,11 @@ jobs:
                   echo "✅ BUILD BERHASIL setelah SDK fix"
                   SUCCESS=true
                   FLUTTER_VERSION_USED="$FLUTTER_VER"
+                  FA_VERSION_USED="$FA_VER"
                   break
                 fi
               fi
-            fi
 
-            if [ $BUILD_EXIT -ne 0 ]; then
               INCOMPAT=$(grep -cE "can't be (extended|implemented|mixed in) outside of its library|Error: The (method|getter|setter|class|argument) .* (isn't defined|can't be)" \
                 "$BUILD_LOG" || true)
               if [ "${INCOMPAT:-0}" -gt 0 ]; then
@@ -575,12 +589,11 @@ jobs:
                   echo "✅ BUILD BERHASIL setelah pub upgrade"
                   SUCCESS=true
                   FLUTTER_VERSION_USED="$FLUTTER_VER"
+                  FA_VERSION_USED="$FA_VER"
                   break
                 fi
               fi
-            fi
 
-            if [ $BUILD_EXIT -ne 0 ]; then
               INCOMPAT2=$(grep -cE "can't be (extended|implemented|mixed in) outside of its library|Error: The (method|getter|setter|class|argument) .* (isn't defined|can't be)" \
                 "$BUILD_LOG" || true)
               if [ "${INCOMPAT2:-0}" -gt 0 ]; then
@@ -595,33 +608,11 @@ jobs:
                   echo "✅ BUILD BERHASIL setelah major upgrade"
                   SUCCESS=true
                   FLUTTER_VERSION_USED="$FLUTTER_VER"
+                  FA_VERSION_USED="$FA_VER"
                   break
                 fi
               fi
-            fi
 
-            if [ $BUILD_EXIT -ne 0 ]; then
-              ICON_ERR=$(grep -cE "IconData.*can't be extended|can't be extended.*IconData|final class" \
-                "$BUILD_LOG" || true)
-              if [ "${ICON_ERR:-0}" -gt 0 ]; then
-                echo "IconData final class error, force upgrade font_awesome_flutter ke ^11.0.0..."
-                fvm flutter pub add font_awesome_flutter:'^11.0.0' 2>/dev/null || \
-                  fvm flutter pub upgrade --major-versions 2>/dev/null || true
-                fix_sdk "$BUILD_LOG" || true
-                fvm flutter build apk --release --no-tree-shake-icons \
-                  --android-skip-build-dependency-validation 2>&1 | tee "$BUILD_LOG"
-                BUILD_EXIT=${PIPESTATUS[0]}
-
-                if [ $BUILD_EXIT -eq 0 ]; then
-                  echo "✅ BUILD BERHASIL setelah font_awesome fix"
-                  SUCCESS=true
-                  FLUTTER_VERSION_USED="$FLUTTER_VER"
-                  break
-                fi
-              fi
-            fi
-
-            if [ $BUILD_EXIT -ne 0 ]; then
               HAS_SDK_ERR2=$(grep -cE "Failed to find Platform SDK|compiles against Android SDK [0-9]+" \
                 "$BUILD_LOG" || true)
               if [ "${HAS_SDK_ERR2:-0}" -gt 0 ]; then
@@ -635,12 +626,11 @@ jobs:
                   echo "✅ BUILD BERHASIL setelah SDK catch-all"
                   SUCCESS=true
                   FLUTTER_VERSION_USED="$FLUTTER_VER"
+                  FA_VERSION_USED="$FA_VER"
                   break
                 fi
               fi
-            fi
 
-            if [ $BUILD_EXIT -ne 0 ]; then
               if grep -q "OutOfMemoryError" "$BUILD_LOG" 2>/dev/null; then
                 echo "OOM terdeteksi, disable parallel build dan naikkan memory..."
                 echo "org.gradle.parallel=false" >> android/gradle.properties
@@ -656,54 +646,11 @@ jobs:
                   echo "✅ BUILD BERHASIL setelah OOM fix"
                   SUCCESS=true
                   FLUTTER_VERSION_USED="$FLUTTER_VER"
+                  FA_VERSION_USED="$FA_VER"
                   break
                 fi
               fi
-            fi
 
-            if [ $BUILD_EXIT -ne 0 ]; then
-              FAICON_ERR=$(grep -cE "FaIconData.*can't be assigned to.*IconData|ByteData.*isn't a type" \
-                "$BUILD_LOG" 2>/dev/null || true)
-              if [ "${FAICON_ERR:-0}" -gt 0 ]; then
-                echo "FaIconData type mismatch terdeteksi, downgrade font_awesome_flutter ke 10.9.0..."
-                python3 - "$(pwd)" <<'FAICON_PYEOF'
-          import os, re
-
-          pubspec_path = os.path.join(".", "pubspec.yaml")
-          if not os.path.exists(pubspec_path):
-              exit(1)
-
-          with open(pubspec_path) as f:
-              content = f.read()
-
-          content = re.sub(
-              r'(\s+)font_awesome_flutter:\s*["\']?[\d.^~><=\s]+["\']?',
-              r'\1font_awesome_flutter: "^10.9.0"',
-              content
-          )
-
-          with open(pubspec_path, 'w') as f:
-              f.write(content)
-
-          print("Force pinned font_awesome_flutter to ^10.9.0")
-          FAICON_PYEOF
-
-                fvm flutter pub get 2>/dev/null || true
-                fvm flutter clean 2>/dev/null || true
-                fvm flutter build apk --release --no-tree-shake-icons \
-                  --android-skip-build-dependency-validation 2>&1 | tee "$BUILD_LOG"
-                BUILD_EXIT=${PIPESTATUS[0]}
-
-                if [ $BUILD_EXIT -eq 0 ]; then
-                  echo "✅ BUILD BERHASIL setelah font_awesome downgrade"
-                  SUCCESS=true
-                  FLUTTER_VERSION_USED="$FLUTTER_VER"
-                  break
-                fi
-              fi
-            fi
-
-            if [ $BUILD_EXIT -ne 0 ]; then
               KOTLIN_ERR=$(grep -cE "Unresolved reference.*compilerOptions|kotlin\s*\{.*Unresolved|compilerOptions.*Unresolved" \
                 "$BUILD_LOG" 2>/dev/null || true)
               if [ "${KOTLIN_ERR:-0}" -gt 0 ]; then
@@ -750,14 +697,21 @@ jobs:
                   echo "✅ BUILD BERHASIL setelah Kotlin DSL fix"
                   SUCCESS=true
                   FLUTTER_VERSION_USED="$FLUTTER_VER"
+                  FA_VERSION_USED="$FA_VER"
                   break
                 fi
               fi
+
+              echo "❌ BUILD GAGAL dengan Flutter $FLUTTER_VER + font_awesome_flutter $FA_VER"
+              ERROR_MSG=$(tail -20 "$BUILD_LOG" | grep -E "Error:|FAILURE:" | head -1)
+              echo "Error: $ERROR_MSG"
+            done
+
+            if [ "$SUCCESS" = true ]; then
+              break
             fi
 
-            echo "❌ BUILD GAGAL dengan Flutter $FLUTTER_VER"
-            ERROR_MSG=$(tail -20 "$BUILD_LOG" | grep -E "Error:|FAILURE:" | head -1)
-            echo "Error: $ERROR_MSG"
+            echo "❌ BUILD GAGAL dengan Flutter $FLUTTER_VER (semua versi font_awesome_flutter dicoba)"
             echo "Trying next Flutter version..."
           done
 
@@ -769,6 +723,7 @@ jobs:
           fi
 
           echo "flutter_version_used=$FLUTTER_VERSION_USED" >> $GITHUB_OUTPUT
+          echo "fa_version_used=$FA_VERSION_USED" >> $GITHUB_OUTPUT
 
       - name: Upload Artifact
         if: steps.build_retry.outcome == 'success'
@@ -783,4 +738,5 @@ jobs:
         run: |
           echo "✅ BUILD BERHASIL"
           echo "Flutter Version: ${{ steps.build_retry.outputs.flutter_version_used }}"
+          echo "font_awesome_flutter Version: ${{ steps.build_retry.outputs.fa_version_used }}"
           echo "APK Path: ${{ env.PROJECT_ROOT }}/build/app/outputs/flutter-apk/app-release.apk"
