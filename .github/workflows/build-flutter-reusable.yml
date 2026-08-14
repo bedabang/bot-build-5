@@ -258,6 +258,8 @@ jobs:
           SUCCESS=false
           FLUTTER_VERSION_USED=""
           FA_VERSION_USED=""
+          MAX_SDK_CEILING=36
+          APPLY_PH_OVERRIDE=false
 
           export PATH="$PATH:$HOME/.pub-cache/bin"
 
@@ -290,6 +292,48 @@ jobs:
               f.write(content)
 
           print(f"Pinned font_awesome_flutter to ^{fa_ver}")
+          PYEOF
+          }
+
+          pin_safe_overrides() {
+            python3 <<'PYEOF'
+          import re, os
+
+          pubspec_path = "pubspec.yaml"
+          if not os.path.exists(pubspec_path):
+              exit(0)
+
+          with open(pubspec_path) as f:
+              content = f.read()
+
+          overrides_to_add = {
+              'permission_handler_android': '"<13.0.0"',
+          }
+
+          if 'dependency_overrides:' not in content:
+              entries = ''.join(f'  {k}: {v}\n' for k, v in overrides_to_add.items())
+              content = content.rstrip() + '\n\ndependency_overrides:\n' + entries
+          else:
+              for pkg, ver in overrides_to_add.items():
+                  if re.search(rf'^\s+{re.escape(pkg)}\s*:', content, re.M):
+                      content = re.sub(
+                          rf'(^\s*{re.escape(pkg)}\s*:\s*).*$',
+                          rf'\1{ver}',
+                          content,
+                          count=1,
+                          flags=re.M
+                      )
+                  else:
+                      content = re.sub(
+                          r'(dependency_overrides:\s*\n)',
+                          f'\\1  {pkg}: {ver}\n',
+                          content
+                      )
+
+          with open(pubspec_path, 'w') as f:
+              f.write(content)
+
+          print("Pinned permission_handler_android to <13.0.0")
           PYEOF
           }
 
@@ -344,16 +388,20 @@ jobs:
               return 0
             fi
 
-            echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
-              "platforms;android-$TARGET" --sdk_root=$ANDROID_HOME 2>&1 | tail -5 || true
+            if [ "$TARGET" -gt "$MAX_SDK_CEILING" ]; then
+              echo "SDK $TARGET melebihi batas aman ($MAX_SDK_CEILING) di runner ini, skip install dan langsung downgrade package via dependency_overrides..."
+            else
+              echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
+                "platforms;android-$TARGET" --sdk_root=$ANDROID_HOME 2>&1 | tail -5 || true
 
-            if [ -d "$ANDROID_HOME/platforms/android-$TARGET" ]; then
-              echo "SDK $TARGET berhasil ter-install"
-              patch_compile_sdk "$TARGET"
-              return 0
+              if [ -d "$ANDROID_HOME/platforms/android-$TARGET" ]; then
+                echo "SDK $TARGET berhasil ter-install"
+                patch_compile_sdk "$TARGET"
+                return 0
+              fi
+
+              echo "SDK $TARGET tidak tersedia via sdkmanager, downgrade packages via dependency_overrides..."
             fi
-
-            echo "SDK $TARGET tidak tersedia via sdkmanager, downgrade packages via dependency_overrides..."
             MAX_AVAIL=$(ls "$ANDROID_HOME/platforms/" 2>/dev/null \
               | grep -oE 'android-[0-9]+' | grep -oE '[0-9]+' | sort -n | tail -1 || echo "36")
             echo "Max SDK tersedia: $MAX_AVAIL"
@@ -494,21 +542,24 @@ jobs:
               fvm flutter clean 2>/dev/null || true
             fi
 
-            if [ "$FLUTTER_VER" = "3.47.0" ]; then
-              FA_VERSIONS_TO_TRY="11.0.0"
-            else
-              FA_VERSIONS_TO_TRY="10.9.0 10.9.1 11.0.0"
-            fi
+            FA_VERSIONS_TO_TRY="ORIGINAL 10.9.0 10.9.1 11.0.0"
 
             for FA_VER in $FA_VERSIONS_TO_TRY; do
               echo ""
-              echo "-- Flutter $FLUTTER_VER + font_awesome_flutter $FA_VER --"
+              if [ "$FA_VER" = "ORIGINAL" ]; then
+                echo "-- Flutter $FLUTTER_VER + font_awesome_flutter (versi asli project, tidak diubah) --"
+              else
+                echo "-- Flutter $FLUTTER_VER + font_awesome_flutter $FA_VER --"
+                pin_fa_version "$FA_VER"
+              fi
 
-              pin_fa_version "$FA_VER"
+              if [ "$APPLY_PH_OVERRIDE" = true ]; then
+                pin_safe_overrides
+              fi
 
               PUB_LOG=$(mktemp)
               if ! fvm flutter pub get 2>&1 | tee "$PUB_LOG"; then
-                echo "flutter pub get gagal dengan font_awesome_flutter $FA_VER, coba versi berikutnya..."
+                echo "flutter pub get gagal, coba versi berikutnya..."
                 continue
               fi
 
@@ -523,6 +574,28 @@ jobs:
                 FLUTTER_VERSION_USED="$FLUTTER_VER"
                 FA_VERSION_USED="$FA_VER"
                 break
+              fi
+
+              if [ "$APPLY_PH_OVERRIDE" != true ]; then
+                PH_SDK_ERR=$(grep -cE "permission_handler_android requires Android SDK|permission_handler_android:compileRelease.*Platform SDK" \
+                  "$BUILD_LOG" || true)
+                if [ "${PH_SDK_ERR:-0}" -gt 0 ]; then
+                  echo "permission_handler_android minta SDK yang gak ada di runner, apply override khusus untuk itu..."
+                  APPLY_PH_OVERRIDE=true
+                  pin_safe_overrides
+                  fvm flutter pub get 2>&1 | tee "$PUB_LOG"
+                  fvm flutter build apk --release --no-tree-shake-icons \
+                    --android-skip-build-dependency-validation 2>&1 | tee "$BUILD_LOG"
+                  BUILD_EXIT=${PIPESTATUS[0]}
+
+                  if [ $BUILD_EXIT -eq 0 ]; then
+                    echo "✅ BUILD BERHASIL setelah override permission_handler_android"
+                    SUCCESS=true
+                    FLUTTER_VERSION_USED="$FLUTTER_VER"
+                    FA_VERSION_USED="$FA_VER"
+                    break
+                  fi
+                fi
               fi
 
               REQ_MIN=$(grep -oE "cannot be smaller than version [0-9]+" "$BUILD_LOG" \
@@ -592,25 +665,6 @@ jobs:
                 fi
               fi
 
-              INCOMPAT2=$(grep -cE "can't be (extended|implemented|mixed in) outside of its library|Error: The (method|getter|setter|class|argument) .* (isn't defined|can't be)" \
-                "$BUILD_LOG" || true)
-              if [ "${INCOMPAT2:-0}" -gt 0 ]; then
-                echo "Masih incompatible, flutter pub upgrade --major-versions..."
-                fvm flutter pub upgrade --major-versions
-                fix_sdk "$BUILD_LOG" || true
-                fvm flutter build apk --release --no-tree-shake-icons \
-                  --android-skip-build-dependency-validation 2>&1 | tee "$BUILD_LOG"
-                BUILD_EXIT=${PIPESTATUS[0]}
-
-                if [ $BUILD_EXIT -eq 0 ]; then
-                  echo "✅ BUILD BERHASIL setelah major upgrade"
-                  SUCCESS=true
-                  FLUTTER_VERSION_USED="$FLUTTER_VER"
-                  FA_VERSION_USED="$FA_VER"
-                  break
-                fi
-              fi
-
               HAS_SDK_ERR2=$(grep -cE "Failed to find Platform SDK|compiles against Android SDK [0-9]+" \
                 "$BUILD_LOG" || true)
               if [ "${HAS_SDK_ERR2:-0}" -gt 0 ]; then
@@ -665,7 +719,7 @@ jobs:
               content = f.read()
 
           overrides_to_add = {
-              'permission_handler_android': '">=13.0.0 <14.0.0"',
+              'permission_handler_android': '"<13.0.0"',
           }
 
           if 'dependency_overrides:' not in content:
@@ -701,6 +755,8 @@ jobs:
               fi
 
               echo "❌ BUILD GAGAL dengan Flutter $FLUTTER_VER + font_awesome_flutter $FA_VER"
+              echo "-- Ringkasan error compile Dart (lib/*.dart) --"
+              grep -E "^lib/.*Error:" "$BUILD_LOG" | head -15 || echo "(tidak ada error compile Dart spesifik, cek log lengkap di atas)"
               ERROR_MSG=$(tail -20 "$BUILD_LOG" | grep -E "Error:|FAILURE:" | head -1)
               echo "Error: $ERROR_MSG"
             done
