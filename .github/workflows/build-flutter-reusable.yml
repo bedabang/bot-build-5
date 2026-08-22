@@ -724,7 +724,8 @@ jobs:
 
             if [ "$FLUTTER_VER" = "3.47.0" ]; then
               TARGET_AGP="8.9.1"
-              python3 pyhelper.py patch_agp_only "$SETTINGS_FILE" "$TARGET_AGP"
+              TARGET_KOTLIN="2.2.20"
+              python3 pyhelper.py patch_settings "$SETTINGS_FILE" "$TARGET_AGP" "$TARGET_KOTLIN"
               return 0
             elif [ "$FLUTTER_VER" = "3.38.0" ] || [ "$FLUTTER_VER" = "3.35.0" ]; then
               TARGET_AGP="8.9.1"
@@ -993,8 +994,11 @@ jobs:
                 "$BUILD_LOG" 2>/dev/null || true)
               if [ "${KOTLIN_ERR:-0}" -gt 0 ]; then
                 echo "Kotlin incompatibility terdeteksi..."
-                if [ "$FLUTTER_VER" = "3.47.0" ]; then
-                  echo "Flutter 3.47.0 pakai built-in Kotlin, tidak forcing plugin Kotlin eksternal"
+                DETECTED_KOTLIN=$(grep -oE "kotlin-stdlib-[0-9]+\.[0-9]+\.[0-9]+" "$BUILD_LOG" \
+                  | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | sort -V | tail -1)
+                if [ -n "$DETECTED_KOTLIN" ]; then
+                  echo "Auto-detected Kotlin stdlib version: $DETECTED_KOTLIN"
+                  python3 pyhelper.py patch_settings "android/settings.gradle.kts" "8.9.1" "$DETECTED_KOTLIN"
                 else
                   python3 pyhelper.py patch_settings "android/settings.gradle.kts" "8.9.1" "2.1.0"
                 fi
