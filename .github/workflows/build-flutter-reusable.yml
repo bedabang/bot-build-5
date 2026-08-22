@@ -687,6 +687,10 @@ jobs:
               sed -i -E 's/^([[:space:]]*)versionName[[:space:]]+([^=].*)$/\1versionName = \2/' "$GRADLE_KTS_RT"
               sed -i -E 's/^([[:space:]]*)applicationId[[:space:]]+"([^"]+)"$/\1applicationId = "\2"/' "$GRADLE_KTS_RT"
             fi
+            GRADLE_WRAPPER="android/gradle/wrapper/gradle-wrapper.properties"
+            if [ -f "$GRADLE_WRAPPER" ]; then
+              sed -i -E 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11.1-all.zip#' "$GRADLE_WRAPPER"
+            fi
             echo "sdk.dir=$ANDROID_SDK_DIR" > android/local.properties
             FLUTTER_ROOT=$(fvm flutter --version --machine 2>/dev/null \
               | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('flutterRoot',''))" \
